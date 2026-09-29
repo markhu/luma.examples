@@ -14,8 +14,10 @@ Needs psutil (+ dependencies) installed::
 """
 
 import os
+import signal
 import sys
 import time
+import socket
 from pathlib import Path
 from datetime import datetime
 
@@ -37,6 +39,41 @@ except ImportError:
 # TODO: Load histogram
 
 
+class IPAddressChecker:
+    def __init__(self, cache_duration_in_seconds=14400):
+        """
+        :param cache_duration_in_seconds: The duration in seconds to cache the IP address for. Default is 4 hours.
+        """
+        self._ip_address = None
+        self._last_checked = None
+        self._cache_duration = cache_duration_in_seconds
+
+    def get_ip_address(self):
+        if self._last_checked is None or time.time() - self._last_checked > self._cache_duration:
+            self._ip_address = self._retrieve_ip_address()
+            self._last_checked = time.time()
+        return self._ip_address
+
+    @staticmethod
+    def _retrieve_ip_address():
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))  # Google DNS. Probably will never be down.
+                return s.getsockname()[0]
+        except Exception as e:
+            print(f"Error: {e}")
+            return ""
+
+
+def shutdown(signum, frame):
+    device.clear()
+    sys.exit(0)
+
+
+signal.signal(signal.SIGTERM, shutdown)
+signal.signal(signal.SIGINT, shutdown)
+
+
 def bytes2human(n):
     """
     >>> bytes2human(10000)
@@ -56,23 +93,32 @@ def bytes2human(n):
 
 
 def cpu_usage():
-    # load average, uptime
+    # cpu usage, uptime
     uptime = datetime.now() - datetime.fromtimestamp(psutil.boot_time())
-    av1, av2, av3 = os.getloadavg()
-    return "Ld:%.1f %.1f %.1f Up: %s" \
-        % (av1, av2, av3, str(uptime).split('.')[0])
+    days = uptime.days
+    hours, remainder = divmod(uptime.seconds, 3600)
+    minutes, _ = divmod(remainder, 60)
+
+    cpu_percent = psutil.cpu_percent(interval=1)
+    return "CPU: %d%% Up: %dd%dh%dm" % (cpu_percent, days, hours, minutes)
 
 
 def mem_usage():
     usage = psutil.virtual_memory()
-    return "Mem: %s %.0f%%" \
-        % (bytes2human(usage.used), 100 - usage.percent)
+    return "RAM: %s/%s (%.0f%%)" % (
+        bytes2human(usage.used),
+        bytes2human(usage.total),
+        usage.percent
+    )
 
 
 def disk_usage(dir):
     usage = psutil.disk_usage(dir)
-    return "SD:  %s %.0f%%" \
-        % (bytes2human(usage.used), usage.percent)
+    return "SD: %s/%s (%.0f%%)" % (
+        bytes2human(usage.used),
+        bytes2human(usage.total),
+        usage.percent
+    )
 
 
 def network(iface):
@@ -83,18 +129,25 @@ def network(iface):
 
 def stats(device):
     # use custom font
-    font_path = str(Path(__file__).resolve().parent.joinpath('fonts', 'C&C Red Alert [INET].ttf'))
-    font2 = ImageFont.truetype(font_path, 12)
+    font_path = str(Path(__file__).resolve().parent.joinpath('fonts', 'DejaVuSansMono.ttf'))
+    font2 = ImageFont.truetype(font_path, 10)
+    ascent, descent = font2.getmetrics()
+    line_height = ascent + descent
 
     with canvas(device) as draw:
-        draw.text((0, 0), cpu_usage(), font=font2, fill="white")
-        if device.height >= 32:
-            draw.text((0, 14), mem_usage(), font=font2, fill="white")
+        draw.rectangle(device.bounding_box, outline="white", fill=None)
+        draw.text((2, line_height * 0), cpu_usage(), font=font2, fill="white")
+        if device.height >= (line_height * 2):
+            draw.text((2, line_height * 1), mem_usage(), font=font2, fill="white")
 
-        if device.height >= 64:
-            draw.text((0, 26), disk_usage('/'), font=font2, fill="white")
+        if device.height >= (line_height * 3):
+            draw.text((2, line_height * 2), disk_usage('/'), font=font2, fill="white")
             try:
-                draw.text((0, 38), network('wlan0'), font=font2, fill="white")
+                if device.height >= (line_height * 4):
+                    draw.text((2, line_height * 3), network('wlan0'), font=font2, fill="white")
+
+                if device.height >= (line_height * 5):
+                    draw.text((2, line_height * 4), ip_address_checker.get_ip_address(), font=font2, fill="white")
             except KeyError:
                 # no wifi enabled/available
                 pass
@@ -109,6 +162,9 @@ def main():
 if __name__ == "__main__":
     try:
         device = get_device()
+        ip_address_checker = IPAddressChecker()
         main()
     except KeyboardInterrupt:
         pass
+    finally:
+        device.clear()
